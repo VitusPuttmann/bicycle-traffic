@@ -8,4 +8,6 @@
 .pytest_cache/
 .mypy_cache/
 data/
+logs/
+airflow.db
 TODO.md
