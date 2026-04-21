@@ -1,0 +1,8 @@
+jobs:
+  deploy:
+    steps:
+      - name: Deploy
+        env:
+          MANIFEST_SIGNING_KEY: ${{ secrets.MANIFEST_SIGNING_KEY }}
+        run: |
+          MANIFEST_SIGNING_KEY=${MANIFEST_SIGNING_KEY} docker compose up -d
