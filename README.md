@@ -7,7 +7,7 @@
 
 ## 📌 Project Purpose
 
-The project predicts the volume of bicycle traffic in Hamburg based on weather data using supervised machine learning, and uses these predictions, together with additional data, to forecast the daily demand for public transport. While none of the data used constitute inherently sensitive personal information and none of the predictions are consequential in nature, the project deliberately considers the regulatory framework applicable to such data and decisions, in order to practice and document a comprehensive compliance workflow.
+The project predicts the volume of bicycle traffic in Hamburg based on weather data using supervised machine learning, and uses these predictions, together with additional data, to forecast the daily demand for public transport. While none of the data used constitute inherently sensitive personal information and none of the predictions are consequential in nature, the project deliberately considers the regulatory framework applicable to such data and decisions, in order to implement and document a comprehensive compliance workflow.
 
 ---
 
