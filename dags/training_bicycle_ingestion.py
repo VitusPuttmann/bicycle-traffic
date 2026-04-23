@@ -7,12 +7,14 @@ import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 import time
 from urllib.parse import quote
+from typing import cast
 
 from airflow import DAG
-from airflow.models.param import Param
-from airflow.operators.python import PythonOperator
+from airflow.models.param import ParamsDict, Param
+from airflow.providers.standard.operators.python import PythonOperator
 import requests
 
 from src.utils.sign_manifest import sign_manifest
@@ -20,6 +22,33 @@ from src.utils.verify_manifest import verify_manifest
 
 
 logger = logging.getLogger(__name__)
+
+
+def _paginate(url: str, timeout: int = 30) -> list:
+    """
+    Follows @iot.nextLink until exhausted.
+    Returns all items.
+    """
+
+    logger.info("Starting pagination", extra={
+        "url": url,
+        "timeout": timeout,
+    })
+
+    results = []
+    next_url = url
+    while next_url:
+        response = requests.get(next_url, timeout=timeout)
+        response.raise_for_status()
+        body = response.json()
+        results.extend(body.get("value", []))
+        next_url = body.get("@iot.nextLink")
+    
+    logger.info("Pagination completed", extra={
+        "total_items": len(results)
+    })
+
+    return results
 
 
 def ping_sta_api(
@@ -87,6 +116,7 @@ def ping_sta_api(
             "error_message": str(exc),
             **log_context,
         })
+        
         raise RuntimeError(
             f"STA API unreachable - connection failed: {base_url}"
         ) from exc
@@ -114,33 +144,6 @@ def ping_sta_api(
         ) from exc
 
 
-def paginate(url: str, timeout: int = 30) -> list:
-    """
-    Follows @iot.nextLink until exhausted.
-    Returns all items.
-    """
-
-    logger.info("Starting pagination", extra={
-        "url": url,
-        "timeout": timeout,
-    })
-
-    results = []
-    next_url = url
-    while next_url:
-        response = requests.get(next_url, timeout=timeout)
-        response.raise_for_status()
-        body = response.json()
-        results.extend(body.get("value", []))
-        next_url = body.get("@iot.nextLink")
-    
-    logger.info("Pagination completed", extra={
-        "total_items": len(results)
-    })
-
-    return results
-
-
 def discover_datastreams(**context) -> list:
     """
     Returns a list of Datastream IDs for the target service and layer.
@@ -153,7 +156,7 @@ def discover_datastreams(**context) -> list:
         "dag_id": dag_run.dag_id,
         "run_id": dag_run.run_id,
         "task_id": task_instance.task_id,
-        "retry_attempt": task_instance.try_number,
+        "retry_attempt": task_instance.try_number - 1,
     }
 
     
@@ -174,7 +177,7 @@ def discover_datastreams(**context) -> list:
         **log_context,
     })
 
-    datastreams = paginate(url)
+    datastreams = _paginate(url)
     
     if not datastreams:
         logger.warning("No Datastreams found", extra={
@@ -276,7 +279,7 @@ def fetch_sta_api_data(**context) -> None:
             **log_context,
         })
 
-        observations = paginate(url)
+        observations = _paginate(url)
 
         filename = f"data/raw/bicycle/bicycle_{ds_id}_{run_ts}.json"
         payload = json.dumps(
@@ -310,6 +313,7 @@ def fetch_sta_api_data(**context) -> None:
     manifest_path = f"data/raw/bicycle/manifest_{run_ts}.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
+    context["ti"].xcom_push(key="manifest", value=manifest)
     
     logger.info("Fetching data successful", extra={
         "datastream_ids": datastream_ids,
@@ -318,16 +322,72 @@ def fetch_sta_api_data(**context) -> None:
     })
 
 
+def validate_data_files(**context):
+    """
+    Checks that data files contain main results.
+    Returns ids of problematic datastreams.
+    """
+
+    dag_run = context["dag_run"]
+    task_instance = context["ti"]
+    log_context = {
+        "dag_id": dag_run.dag_id,
+        "run_id": dag_run.run_id,
+        "task_id": task_instance.task_id,
+        "retry_attempt": task_instance.try_number,
+    }
+
+    manifest = context["ti"].xcom_pull(
+        task_ids="fetch_sta_api_data", key="manifest"
+    )
+
+    logger.info("Starting data file validation", extra={
+        **log_context,
+    })
+
+    problematic_files = []
+    for file_entry in manifest["files"]:
+        file_name = file_entry["filename"]
+        with open(file_name, "r") as f:
+            file_content = json.load(f)
+        datastream_id = file_content["datastream_id"]
+
+        problematic_observations = []
+        problematic = False
+        for observation_entry in file_content["observations"]:
+            if observation_entry.get("result") is None:
+                observation_time = observation_entry["phenomenonTime"]
+                problematic_observations.append(observation_time)
+        
+        if problematic_observations:
+            problem = {datastream_id: problematic_observations}
+            problematic_files.append(problem)
+
+            logger.info("Problematic file discovered", extra={
+                "datastream_id": datastream_id,
+                **log_context,
+            })
+    
+    with open ("data/raw/bicycle/problematic_files.json", "w") as f:
+        f.write(json.dumps(problematic_files))
+    
+    if problematic_files:
+        logger.warning("Problematic files discovered", extra={
+            "datastream_ids": [next(iter(d)) for d in problematic_files],
+            **log_context,
+        })
+
+
 with DAG(
     dag_id="training_bicycle_data_pull",
     start_date=datetime(2026, 4, 16),
     schedule=None,
     catchup=False,
-    params={
+    params=cast(ParamsDict, {
         "start_date": Param("2023-01-01", type="string"),
         "end_date":   Param("2025-12-31", type="string"),
         "layer_name": Param("Anzahl_Fahrraeder_Zaehlstelle_1-Tag", type="string"),
-    }
+    })
 ) as dag:
 
     ping_task = PythonOperator(
@@ -345,4 +405,9 @@ with DAG(
         python_callable=fetch_sta_api_data,
     )
 
-    ping_task >> discover_task >> extract_task
+    validate_task = PythonOperator(
+        task_id="validate_data_files",
+        python_callable=validate_data_files
+    )
+
+    ping_task >> discover_task >> extract_task >> validate_task
